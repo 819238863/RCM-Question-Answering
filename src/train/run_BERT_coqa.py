@@ -24,7 +24,8 @@ import torch.nn.functional as F
 from transformers.tokenization_bert import whitespace_tokenize, BasicTokenizer, BertTokenizer
 from transformers.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 
-from optimization import BertAdam, warmup_linear
+# from optimization import BertAdam, warmup_linear
+from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 from model.modeling_BERT import BertQA
 from data_helper.qa_util import split_train_dev_data
 from data_helper.data_helper_coqa import read_coqa_examples
@@ -78,15 +79,18 @@ def validate_model(args, model, tokenizer, dev_examples, dev_features,
 
 def train_model(args, model, tokenizer, optimizer, train_examples, train_features,
                 dev_examples, dev_features, dev_evaluator, device, n_gpu, t_total):
+    # 数据转tensor并加载DataLoader
     all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
     all_start_positions = torch.tensor([f.start_position for f in train_features], dtype=torch.long)
     all_end_positions = torch.tensor([f.end_position for f in train_features], dtype=torch.long)
-    all_yes_no_flags = torch.tensor([f.yes_no_flag for f in train_features], dtype=torch.long)
-    all_yes_no_answers = torch.tensor([f.yes_no_ans for f in train_features], dtype=torch.long)
+    # all_yes_no_flags = torch.tensor([f.yes_no_flag for f in train_features], dtype=torch.long)
+    # all_yes_no_answers = torch.tensor([f.yes_no_ans for f in train_features], dtype=torch.long)
+    # train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
+    #                            all_start_positions, all_end_positions, all_yes_no_flags, all_yes_no_answers)
     train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                               all_start_positions, all_end_positions, all_yes_no_flags, all_yes_no_answers)
+                                all_start_positions, all_end_positions)
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_data)
     else:
@@ -114,12 +118,15 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
     for _ in trange(int(args.num_train_epochs), desc="Epoch"):
         training_loss = 0.0
         for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            # 设置GPU
             if n_gpu == 1:
                 batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-            input_ids, input_mask, segment_ids, start_positions, end_positions, \
-                       yes_no_flags, yes_no_answers = batch
-            loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions, \
-                         yes_no_flags, yes_no_answers)
+            # input_ids, input_mask, segment_ids, start_positions, end_positions, \
+            #            yes_no_flags, yes_no_answers = batch
+            input_ids, input_mask, segment_ids, start_positions, end_positions = batch
+            # loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions, \
+            #              yes_no_flags, yes_no_answers)
+            loss = model(input_ids, segment_ids, input_mask, start_positions, end_positions)
             if n_gpu > 1:
                 loss = loss.mean() # mean() to average on multi-gpu.
             if args.gradient_accumulation_steps > 1:
@@ -162,17 +169,19 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
 
 def main():
     parser = argparse.ArgumentParser()
-
+    output_path = 'D:\\Code\\Pycharm_pythonProject\\Paper Repetition\\RCM-Question-Answering\\src\\output'
+    train_data_path = 'D:\\Code\\Pycharm_pythonProject\\Paper Repetition\\' \
+                      'RCM-Question-Answering\\src\\dataset\\coqa\\coqa-train-v1.0.json'
     ## Required parameters
-    parser.add_argument("--bert_model", default=None, type=str, required=True,
+    parser.add_argument("--bert_model", default='bert-base-uncased', type=str, required=False,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                         "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
                         "bert-base-multilingual-cased, bert-base-chinese.")
-    parser.add_argument("--output_dir", default=None, type=str, required=True,
+    parser.add_argument("--output_dir", default=output_path, type=str, required=False,
                         help="The output directory where the model checkpoints and predictions will be written.")
 
     ## Other parameters
-    parser.add_argument("--train_file", default=None, type=str, help="triviaqa train file")
+    parser.add_argument("--train_file", default=train_data_path, type=str, help="coqa train file")
     parser.add_argument("--use_history", default=False, action="store_true")
     parser.add_argument("--append_history", default=False, action="store_true", help="Whether to append the previous queries to the current one.")
     parser.add_argument("--n_history", default=-1, type=int, help="The number of previous queries used in current query.")
@@ -184,8 +193,8 @@ def main():
     parser.add_argument("--max_query_length", default=64, type=int,
                         help="The maximum number of tokens for the question. Questions longer than this will "
                              "be truncated to this length.")
-    parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
-    parser.add_argument("--do_validate", action='store_true', help="Whether to run validation when training")
+    parser.add_argument("--do_train",  default=True, action='store_true', help="Whether to run training.")
+    parser.add_argument("--do_validate",  default=True, action='store_true', help="Whether to run validation when training")
     # model parameters
     parser.add_argument("--train_batch_size", default=32, type=int, help="Total batch size for training.")
     parser.add_argument("--predict_batch_size", default=8, type=int, help="Total batch size for predictions.")
@@ -275,8 +284,8 @@ def main():
 
     logger.info("Training BERT model")
     model = BertQA.from_pretrained(args.bert_model,
-                                   cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
-                                   allow_yes_no=True)
+                                   cache_dir=PYTORCH_PRETRAINED_BERT_CACHE + 'distributed_{}'.format(args.local_rank),
+                                   allow_yes_no=False)
     
     if args.fp16:
         model.half()
@@ -311,7 +320,7 @@ def main():
     num_train_steps = None
     if args.do_train:
         # Load examples
-        cached_train_examples_file = args.train_file+'_train_examples'
+        cached_train_examples_file = args.train_file + '_train_examples'
         cached_dev_examples_file = args.train_file+'_dev_examples'
         try:
             with open(cached_train_examples_file, "rb") as reader:
@@ -409,6 +418,7 @@ def main():
         logger.info("  Num train split examples = %d", len(train_features))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
+
 
         if args.do_validate and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
             logger.info("***** Dev data *****")

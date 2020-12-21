@@ -184,12 +184,16 @@ def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
 def gen_model_features(cur_global_pointers, batch_query_tokens, batch_doc_tokens, \
                        batch_start_positions, batch_end_positions, batch_max_doc_length, \
                        max_seq_length, tokenizer, is_train):
+    """
+
+    """
     # select next chunk doc_tokens
     chunk_doc_offsets = []
     chunk_doc_tokens = []
     chunk_start_positions = []
     chunk_end_positions = []
     chunk_stop_flags = []
+    # 进行分块
     for index in range(len(cur_global_pointers)):
         # span: [doc_start, doc_span)
         doc_start = max(0, cur_global_pointers[index])
@@ -247,6 +251,7 @@ def gen_model_features(cur_global_pointers, batch_query_tokens, batch_doc_tokens
         # gen features
         one_input_ids = tokenizer.convert_tokens_to_ids(one_tokens)
         one_input_mask = [1] * len(one_input_ids)
+        # padding
         while len(one_input_ids) < max_seq_length:
             one_input_ids.append(0)
             one_input_mask.append(0)
@@ -258,7 +263,8 @@ def gen_model_features(cur_global_pointers, batch_query_tokens, batch_doc_tokens
         chunk_input_mask.append(one_input_mask[:])
         chunk_segment_ids.append(one_segment_ids[:])
         if is_train:
-            # adjust start_positions and end_positions due to doc offsets caused by query and CLS/SEP tokens in the input feature
+            # adjust start_positions and end_positions due to doc offsets caused by
+            # query and CLS/SEP tokens in the input feature
             chunk_start_positions[index] += len(one_query_tokens) + 2
             chunk_end_positions[index] += len(one_query_tokens) + 2
 

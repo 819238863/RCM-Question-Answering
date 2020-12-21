@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from transformers.tokenization_bert import whitespace_tokenize, BasicTokenizer, BertTokenizer
 from transformers.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 
-from optimization import BertAdam, warmup_linear
+from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 from model.modeling_BERT import BertQA
 from data_helper.qa_util import split_train_dev_data
 from data_helper.data_helper_trivia import read_trivia_examples

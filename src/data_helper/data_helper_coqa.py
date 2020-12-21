@@ -78,8 +78,8 @@ class ExampleFeature(object):
         self.tok_to_orig_map=tok_to_orig_map
         self.start_position = start_position
         self.end_position = end_position
-        self.yes_no_flag = yes_no_flag
-        self.yes_no_ans = yes_no_ans
+        # self.yes_no_flag = yes_no_flag
+        # self.yes_no_ans = yes_no_ans
 
 
 
@@ -133,7 +133,7 @@ def read_coqa_examples(input_file, is_training=True, use_history=False, n_histor
                 print("question turns are not ordered!")
                 print("mismatched question {}".format(cur_question_text))
             if is_training:
-                orig_answer_text = ans["text"]
+                orig_answer_text = ans["input_text"]
                 answer_offset = ans["span_start"]
                 answer_length = len(orig_answer_text)
                 start_position = char_to_word_offset[answer_offset]
@@ -143,8 +143,8 @@ def read_coqa_examples(input_file, is_training=True, use_history=False, n_histor
                     end_position = char_to_word_offset[answer_offset + answer_length]
                 actual_text = " ".join(doc_tokens[start_position:(end_position+1)])
                 cleaned_answer_text = " ".join(whitespace_tokenize(orig_answer_text))
-                yes_no_flag = int(ans["yes_no_flag"])
-                yes_no_ans = int(ans["yes_no_ans"])
+                # yes_no_flag = int(ans["yes_no_flag"])
+                # yes_no_ans = int(ans["yes_no_ans"])
                 if actual_text.find(cleaned_answer_text) == -1:
                     logger.warning("Could not find answer: '%s' vs. '%s'",
                                            actual_text, cleaned_answer_text)

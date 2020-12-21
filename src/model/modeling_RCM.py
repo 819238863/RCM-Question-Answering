@@ -159,6 +159,7 @@ class RCMBert(BertPreTrainedModel):
         # add dropout
         sequence_output = self.dropout(sequence_output)
         # sent_output: (batch_size, hidden_size)
+        # 这就是cls的表示，也就是论文的v_c
         sent_output = sequence_output.narrow(1, 0, 1)
         sent_output = sent_output.squeeze(1)
         

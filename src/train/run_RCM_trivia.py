@@ -23,8 +23,8 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.nn.functional as F
 from transformers.tokenization_bert import whitespace_tokenize, BasicTokenizer, BertTokenizer
 from transformers.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-
-from optimization import BertAdam, warmup_linear
+from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
+# from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
 from model.modeling_RCM import RCMBert
 from model.rl_reward import reward_estimation, reward_estimation_for_stop
 #from model.modeling_BERT import BertForQA
@@ -116,7 +116,10 @@ def validate_model(args, model, tokenizer, dev_examples, dev_features,
 
 def train_model(args, model, tokenizer, optimizer, train_examples, train_features,
                 dev_examples, dev_features, dev_evaluator, device, n_gpu, t_total):
+    # train_features = TensorDataset(train_token, train_masks, train_labels)
     train_indices = torch.arange(len(train_features), dtype=torch.long)
+    # train_indices = tensor([ 0, 1, 2,  ..., 3161, 3162, 3163])
+    # 这样处理读取数据速度更快
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_indices)
     else:
@@ -135,6 +138,7 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
     for _ in trange(int(args.num_train_epochs), desc="Epoch"):
         training_loss = 0.0
         for step, batch_indices in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            # batch_indices 一个batch的下标
             batch_features = [train_features[ind] for ind in batch_indices]
             batch_query_tokens = [f.query_tokens for f in batch_features]
             batch_doc_tokens = [f.doc_tokens for f in batch_features]
@@ -151,6 +155,7 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
             stop_loss = None
             answer_loss = None
             prev_hidden_states = None
+            # 分块
             for t in range(args.max_read_times):
                 # features at the current chunk
                 chunk_input_ids, chunk_input_mask, chunk_segment_ids, id_to_tok_maps, \
@@ -158,6 +163,7 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
                                  gen_model_features(cur_global_pointers, batch_query_tokens, batch_doc_tokens, \
                                                     batch_start_positions, batch_end_positions, batch_max_doc_length, \
                                                     args.max_seq_length, tokenizer, is_train=True)
+
                 chunk_input_ids = torch.tensor(chunk_input_ids, dtype=torch.long, device=device)
                 chunk_input_mask = torch.tensor(chunk_input_mask, dtype=torch.long, device=device)
                 chunk_segment_ids = torch.tensor(chunk_segment_ids, dtype=torch.long, device=device)
@@ -168,18 +174,23 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
                 chunk_stop_flags = torch.tensor(chunk_stop_flags, dtype=torch.long, device=device)
                 
                 # model to find span
+                # chunk_stride_log_probs 就是logP(a|s,theta)
+                # chunk_stride_inds  move action index
                 chunk_stop_logits, chunk_stride_inds, chunk_stride_log_probs, \
                                    chunk_start_logits, chunk_end_logits, prev_hidden_states, \
                                    chunk_stop_loss, chunk_answer_loss = \
                                    model(chunk_input_ids, chunk_segment_ids, chunk_input_mask,
                                          prev_hidden_states, chunk_stop_flags,
                                          chunk_start_positions, chunk_end_positions)
+                # stop_probs 计算每一次模型预测segment包含answer的概率 对应的是q_c
                 chunk_stop_logits = chunk_stop_logits.detach()
                 chunk_stop_probs = F.softmax(chunk_stop_logits, dim=1)
                 chunk_stop_probs = chunk_stop_probs[:, 1]
                 stop_probs.append(chunk_stop_probs.tolist())
+
                 chunk_stop_logits = chunk_stop_logits.tolist()
-                
+
+                # chunking loss
                 if stop_loss is None:
                     stop_loss = chunk_stop_loss
                 else:
@@ -190,16 +201,18 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
                 else:
                     answer_loss += chunk_answer_loss
 
+                # 是监督学习 不是RL
                 if args.supervised_pretraining:
                     chunk_strides = [args.doc_stride] * batch_size
                 else:
+                    # stride_action_space = [-32, 64, 128, 256, 512]
                     # take movement action
                     chunk_strides = [stride_action_space[stride_ind] for stride_ind in chunk_stride_inds.tolist()]
                 cur_global_pointers = [cur_global_pointers[ind] + chunk_strides[ind] for ind in range(len(cur_global_pointers))]
                 # put pointer to 0 or the last doc token
                 cur_global_pointers = [min(max(0, cur_global_pointers[ind]), len(batch_doc_tokens[ind])-1) \
                                        for ind in range(len(cur_global_pointers))]
-
+                # 采用RL学习方法
                 if not args.supervised_pretraining:
                     # reward estimation for reinforcement learning
                     chunk_start_probs = F.softmax(chunk_start_logits.detach(), dim=1).tolist()
@@ -207,24 +220,31 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
                     #chunk_yes_no_flag_probs = F.softmax(chunk_yes_no_flag_logits.detach(), dim=1).tolist()
                     #chunk_yes_no_ans_probs = F.softmax(chunk_yes_no_ans_logits.detach(), dim=1).tolist()
                     # rewards if stop at the current chunk
+                    # 用来记录每一次分割下得到的r_c r_c每一次模型从segment中提取出answer的概率
                     chunk_stop_rewards = reward_estimation_for_stop(chunk_start_probs, chunk_end_probs,
                                                                     chunk_start_positions.tolist(), chunk_end_positions.tolist(),
                                                                     chunk_stop_flags.tolist())
+                    # 保存每次的r_c
                     stop_rewards.append(chunk_stop_rewards)
 
                     # save history (exclude the prob of the last read since the last action is not evaluated)
                     if (t < args.max_read_times - 1):
+                        # logP(a|s,theta)的list
                         stride_log_probs.append(chunk_stride_log_probs)
-
+            # 采用的不是RL学习方法
             if args.supervised_pretraining:
+                # stop_loss为chunking loss
+                # args.stop_loss_weight 这里默认为1 其实没啥影响
                 loss = (stop_loss * args.stop_loss_weight + answer_loss) / args.max_read_times
             else:
                 # stride_log_probs: (bsz, max_read_times-1)
                 stride_log_probs = torch.stack(stride_log_probs).transpose(1,0)
                 # q_vals: (bsz, max_read_times-1)
+                # q_vals 为reward
                 q_vals = reward_estimation(stop_rewards, stop_probs)
                 q_vals = torch.tensor(q_vals, dtype=stride_log_probs.dtype, device=device)
                 #logger.info("q_vals: {}".format(q_vals))
+                # rl的loss
                 reinforce_loss = torch.sum(-stride_log_probs * q_vals, dim=1)
                 reinforce_loss = torch.mean(reinforce_loss, dim=0)
 
@@ -234,7 +254,7 @@ def train_model(args, model, tokenizer, optimizer, train_examples, train_feature
                 loss = loss.mean() # mean() to average on multi-gpu.
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
-
+            # 反向传播
             if args.fp16:
                 optimizer.backward(loss)
             else:
@@ -344,17 +364,19 @@ def test_model(args, model, tokenizer, test_examples, test_features, device):
 
 def main():
     parser = argparse.ArgumentParser()
-
+    output_path = 'D:\\Code\\Pycharm_pythonProject\\Paper Repetition\\RCM-Question-Answering\\src\\output'
+    train_data_path = 'D:\\Code\\Pycharm_pythonProject\\Paper Repetition\\' \
+                      'RCM-Question-Answering\\src\\dataset\\coqa\\coqa-train-v1.0.json'
     ## Required parameters
-    parser.add_argument("--bert_model", default=None, type=str, required=True,
+    parser.add_argument("--bert_model", default='bert-base-uncased', type=str, required=False,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                         "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
                         "bert-base-multilingual-cased, bert-base-chinese.")
     parser.add_argument("--pretrained_model_path", default=None, type=str, help="Pretrained basic Bert model")
-    parser.add_argument("--output_dir", default=None, type=str, required=True,
+    parser.add_argument("--output_dir", default=output_path, type=str, required=False,
                         help="The output directory where the model checkpoints and predictions will be written.")
     ## Other parameters
-    parser.add_argument("--train_file", default=None, type=str, help="triviaqa train file")
+    parser.add_argument("--train_file", default=train_data_path, type=str, help="triviaqa train file")
     parser.add_argument("--predict_file", default=None, type=str,
                         help="triviaqa dev or test file in SQuAD format")
     # history queries parameters
@@ -366,8 +388,8 @@ def main():
     parser.add_argument("--max_query_length", default=64, type=int,
                         help="The maximum number of tokens for the question. Questions longer than this will "
                              "be truncated to this length.")
-    parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
-    parser.add_argument("--do_validate", action='store_true', help="Whether to run validation when training")
+    parser.add_argument("--do_train", default=True, action='store_true', help="Whether to run training.")
+    parser.add_argument("--do_validate", default=True, action='store_true', help="Whether to run validation when training")
     parser.add_argument("--do_predict", action='store_true', help="Whether to run eval on the dev set.")
     # supervised & reinforcement learning
     parser.add_argument("--supervised_pretraining", action='store_true', help="Whether to do supervised pretraining.")
@@ -477,7 +499,8 @@ def main():
     else:
         logger.info("Training a new model from scratch")
         model = RCMBert.from_pretrained(args.bert_model,
-                                        cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
+                                        # cache_dir=PYTORCH_PRETRAINED_BERT_CACHE + 'distributed_{}'.format(args.local_rank),
+                                        cache_dir = 'C:\\Users\\shu.liu\\.cache\\torch\\transformers',
                                         action_num=len(stride_action_space),
                                         recur_type=args.recur_type,
                                         allow_yes_no=False)
@@ -649,8 +672,6 @@ def main():
         logger.info("  Num test split examples = %d", len(test_features))
         logger.info("  Batch size = %d", args.predict_batch_size)
         test_model(args, model, tokenizer, test_examples, test_features, device)
-        
-
 
 
 if __name__ == "__main__":
